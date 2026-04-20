@@ -22,18 +22,25 @@ def classify_good_metric(value: float) -> str:
         return "Intermediate"
     return "Preserved"
 
-def overall_state_label(avg_stress: float, avg_function: float) -> tuple[str, str, str]:
-    if avg_stress > 70 and avg_function < 35:
+def overall_state_label(stress_load: float, function_level: float, hypoxia: bool) -> tuple[str, str, str]:
+    # Distinguish between low-function vulnerability and active disease-like dysfunction
+    if stress_load > 70 and function_level < 35:
         return (
             "High endothelial dysfunction",
-            "This profile suggests a more disease-like endothelial state with high stress and reduced repair capacity.",
+            "This profile suggests a disease-like endothelial state with high stress and reduced repair capacity.",
             "bad",
         )
-    elif avg_stress < 35 and avg_function > 65:
+    elif stress_load < 35 and function_level > 65:
         return (
             "More balanced endothelial state",
             "This profile suggests lower stress with better-preserved endothelial metabolism and repair.",
             "good",
+        )
+    elif stress_load < 45 and function_level < 40 and not hypoxia:
+        return (
+            "Low-function vulnerable state",
+            "This profile suggests weak endothelial reserve without strong active stress. The system may be vulnerable to additional insults.",
+            "warn",
         )
     else:
         return (
@@ -91,7 +98,7 @@ preset_values = {
     "Healthy-like": dict(bmpr2=85, nrf2=80, ces1=85, epigenetic=10, hypoxia=False),
     "Intermediate": dict(bmpr2=55, nrf2=50, ces1=55, epigenetic=30, hypoxia=False),
     "PAH-like": dict(bmpr2=20, nrf2=20, ces1=20, epigenetic=70, hypoxia=True),
-    "Rescue-like": dict(bmpr2=55, nrf2=70, ces1=75, epigenetic=20, hypoxia=False),
+    "Rescue-like": dict(bmpr2=20, nrf2=20, ces1=80, epigenetic=70, hypoxia=True),
 }
 
 if preset == "Custom":
@@ -113,56 +120,63 @@ hypoxia = st.toggle("Hypoxia", value=default_vals["hypoxia"])
 # --------------------------------------------------
 # Mechanism-inspired model
 # --------------------------------------------------
-# Paper-consistent design principles:
-# 1) BMPR2 supports NRF2 and CES1
-# 2) NRF2 supports antioxidant/metabolic balance and CES1
-# 3) Epigenetic repression lowers functional CES1
-# 4) CES1 loss is a major failure point
-# 5) Hypoxia amplifies dysfunction, especially when CES1 is low
+# Design goals:
+# 1) BMPR2 supports NRF2; both support CES1-related protection
+# 2) Epigenetic repression strongly reduces functional CES1
+# 3) CES1 is a major bottleneck for stress handling and repair
+# 4) Hypoxia is a stress trigger / amplifier
+# 5) Low everything without hypoxia should be vulnerable, not maximally stressed
 
-# "Axis support" approximates upstream protective signaling
+# Upstream protective support
 axis_support = clamp(0.55 * bmpr2 + 0.45 * nrf2)
 
-# Effective CES1 reflects its own slider plus upstream support minus repression
+# Functional CES1 is strongly reduced by repression, partially supported by the axis
 effective_ces1 = clamp(
-    0.55 * ces1 +
-    0.20 * bmpr2 +
-    0.15 * nrf2 -
-    0.65 * epigenetic
+    0.70 * ces1
+    + 0.15 * bmpr2
+    + 0.15 * nrf2
+    - 0.85 * epigenetic
 )
 
-# Loss-of-CES1 penalty: little effect when CES1 is adequate,
-# but steeper collapse once it gets low
-ces1_loss = clamp(100 - effective_ces1)
-loss_penalty = (ces1_loss / 100) ** 1.6
+# Capacity: how resilient the system is
+resilience = clamp(0.60 * effective_ces1 + 0.40 * axis_support)
 
-# Additional upstream failure burden when BMPR2/NRF2 axis is low
-axis_loss = clamp(100 - axis_support)
-axis_penalty = (axis_loss / 100) ** 1.2
+# Vulnerability rises as resilience falls
+vulnerability = clamp(100 - resilience)
 
-# Hypoxia acts mainly as an amplifier, especially when system is already fragile
-hypoxia_factor = 1.0 + (0.22 if hypoxia else 0.0)
+# Basal dysfunction from low resilience alone
+basal_load = clamp(0.35 * vulnerability)
 
-# Stress markers
-ros = clamp((12 + 58 * loss_penalty + 18 * axis_penalty) * hypoxia_factor)
-lipid = clamp((10 + 62 * loss_penalty + 10 * axis_penalty) * (1.12 if hypoxia else 1.0))
-glycolysis = clamp((12 + 55 * loss_penalty + 15 * axis_penalty) * (1.10 if hypoxia else 1.0))
-apoptosis = clamp((10 + 54 * loss_penalty + 18 * axis_penalty) * hypoxia_factor)
+# Hypoxia acts as an external stress challenge
+stress_trigger = 35 if hypoxia else 0
 
-# Protective/function markers
-fao = clamp((92 - 65 * loss_penalty - 15 * axis_penalty) / hypoxia_factor)
-angiogenesis = clamp((90 - 60 * loss_penalty - 18 * axis_penalty) / hypoxia_factor)
+# Stress amplification depends on vulnerability
+stress_amplifier = stress_trigger * (0.35 + 0.65 * (vulnerability / 100))
 
-# Grouped summaries for simpler user interpretation
+# Total stress burden
+stress_burden = clamp(basal_load + stress_amplifier)
+
+# Downstream markers
+ros = clamp(0.35 * basal_load + 1.05 * stress_amplifier)
+lipid = clamp(0.55 * vulnerability + 0.35 * stress_amplifier)
+glycolysis = clamp(0.45 * vulnerability + 0.45 * stress_amplifier)
+apoptosis = clamp(0.30 * vulnerability + 0.85 * stress_amplifier)
+
+# Protective functions depend mainly on resilience and are hurt by stress
+fao = clamp(0.85 * resilience - 0.25 * stress_amplifier)
+angiogenesis = clamp(0.75 * resilience - 0.35 * stress_amplifier)
+
+# Grouped summaries for simpler interpretation
 oxidative_stress = clamp(ros)
 lipid_stress = clamp(lipid)
 energy_metabolism = clamp((fao + (100 - glycolysis)) / 2)
 vessel_repair = clamp((angiogenesis + (100 - apoptosis)) / 2)
 
-avg_stress = (oxidative_stress + lipid_stress) / 2
-avg_function = (energy_metabolism + vessel_repair) / 2
+# Overall result uses active stress + preserved function
+stress_load = (oxidative_stress + lipid_stress) / 2
+function_level = (energy_metabolism + vessel_repair) / 2
 
-overall_title, overall_text, overall_kind = overall_state_label(avg_stress, avg_function)
+overall_title, overall_text, overall_kind = overall_state_label(stress_load, function_level, hypoxia)
 
 # --------------------------------------------------
 # Main summary
@@ -218,6 +232,12 @@ with st.expander("Show detailed markers"):
     st.write(f"**Effective CES1:** {effective_ces1:.1f}/100")
     st.caption("Estimated functional CES1 after upstream support and epigenetic repression are considered")
 
+    st.write(f"**Resilience:** {resilience:.1f}/100")
+    st.caption("Estimated endothelial reserve / protective capacity")
+
+    st.write(f"**Stress burden:** {stress_burden:.1f}/100")
+    st.caption("Estimated disease-driving stress load after accounting for hypoxia and vulnerability")
+
 with st.expander("What do 0 and 100 mean?"):
     st.markdown(
         """
@@ -234,14 +254,15 @@ These are **relative conceptual scores**, not absolute lab units.
 with st.expander("How this version matches the paper better"):
     st.markdown(
         """
-This version is designed so that it behaves **qualitatively** like the paper:
+This version is designed to reflect the paper's qualitative logic:
 
-- **CES1 loss** drives oxidative stress, lipid accumulation, apoptosis, reduced FAO, and impaired angiogenesis.
-- **BMPR2 and NRF2** support the CES1 axis rather than acting as equal standalone drivers.
-- **Epigenetic repression** suppresses effective CES1.
-- **Hypoxia** worsens an already fragile system rather than acting as the main driver by itself.
+- **CES1 loss** increases ROS, lipid stress, apoptosis, and metabolic dysfunction.
+- **BMPR2 and NRF2** support the protective axis rather than acting as equal independent disease drivers.
+- **Epigenetic repression** strongly reduces functional CES1.
+- **Hypoxia** acts as a stress trigger that worsens a fragile system.
+- **Low reserve without hypoxia** is treated as vulnerability, not automatically as full active disease.
 
-It is still a **mechanism-inspired conceptual model**, not a quantitatively fitted experimental model.
+It is still a **mechanism-inspired conceptual model**, not a fitted experimental model.
 """
     )
 
