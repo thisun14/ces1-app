@@ -23,14 +23,13 @@ def classify_good_metric(value: float) -> str:
     return "Preserved"
 
 def overall_state_label(stress_load: float, function_level: float, hypoxia: bool) -> tuple[str, str, str]:
-    # Distinguish between low-function vulnerability and active disease-like dysfunction
     if stress_load > 70 and function_level < 35:
         return (
             "High endothelial dysfunction",
             "This profile suggests a disease-like endothelial state with high stress and reduced repair capacity.",
             "bad",
         )
-    elif stress_load < 35 and function_level > 65:
+    elif stress_load < 30 and function_level > 70:
         return (
             "More balanced endothelial state",
             "This profile suggests lower stress with better-preserved endothelial metabolism and repair.",
@@ -120,59 +119,61 @@ hypoxia = st.toggle("Hypoxia", value=default_vals["hypoxia"])
 # --------------------------------------------------
 # Mechanism-inspired model
 # --------------------------------------------------
-# Design goals:
-# 1) BMPR2 supports NRF2; both support CES1-related protection
-# 2) Epigenetic repression strongly reduces functional CES1
-# 3) CES1 is a major bottleneck for stress handling and repair
-# 4) Hypoxia is a stress trigger / amplifier
-# 5) Low everything without hypoxia should be vulnerable, not maximally stressed
-
-# Upstream protective support
+# BMPR2 and NRF2 act mainly as upstream support for CES1-related protection.
 axis_support = clamp(0.55 * bmpr2 + 0.45 * nrf2)
 
-# Functional CES1 is strongly reduced by repression, partially supported by the axis
-effective_ces1 = clamp(
-    0.70 * ces1
-    + 0.15 * bmpr2
+# CES1 depends on its own expression, upstream support, and repression.
+# Repression is intentionally strong.
+raw_ces1_capacity = (
+    0.65 * ces1
+    + 0.20 * bmpr2
     + 0.15 * nrf2
-    - 0.85 * epigenetic
+    - 0.95 * epigenetic
 )
 
-# Capacity: how resilient the system is
-resilience = clamp(0.60 * effective_ces1 + 0.40 * axis_support)
+# Upstream deficiency weakens the ability of CES1 to function.
+axis_multiplier = 0.35 + 0.65 * (axis_support / 100.0)
 
-# Vulnerability rises as resilience falls
+effective_ces1 = clamp(raw_ces1_capacity * axis_multiplier)
+
+# Resilience combines effective CES1 with upstream signaling.
+resilience = clamp(0.70 * effective_ces1 + 0.30 * axis_support)
+
+# Vulnerability rises as resilience falls.
 vulnerability = clamp(100 - resilience)
 
-# Basal dysfunction from low resilience alone
-basal_load = clamp(0.35 * vulnerability)
+# Threshold behavior:
+# once effective CES1 gets low, damage accelerates sharply.
+ces1_deficit = clamp(100 - effective_ces1) / 100.0
+threshold_penalty = ces1_deficit ** 1.8
 
-# Hypoxia acts as an external stress challenge
-stress_trigger = 35 if hypoxia else 0
+# Basal dysfunction from poor reserve
+basal_stress = clamp(8 + 22 * threshold_penalty + 0.10 * vulnerability)
 
-# Stress amplification depends on vulnerability
-stress_amplifier = stress_trigger * (0.35 + 0.65 * (vulnerability / 100))
+# Hypoxia acts like a stress trigger whose impact depends on vulnerability.
+hypoxia_driver = 0.0
+if hypoxia:
+    hypoxia_driver = 18 + 28 * threshold_penalty + 0.20 * vulnerability
 
 # Total stress burden
-stress_burden = clamp(basal_load + stress_amplifier)
+stress_burden = clamp(basal_stress + hypoxia_driver)
 
-# Downstream markers
-ros = clamp(0.35 * basal_load + 1.05 * stress_amplifier)
-lipid = clamp(0.55 * vulnerability + 0.35 * stress_amplifier)
-glycolysis = clamp(0.45 * vulnerability + 0.45 * stress_amplifier)
-apoptosis = clamp(0.30 * vulnerability + 0.85 * stress_amplifier)
+# Downstream stress markers
+ros = clamp(5 + 20 * threshold_penalty + 0.35 * stress_burden + (10 if hypoxia else 0))
+lipid = clamp(8 + 35 * threshold_penalty + 0.20 * vulnerability + 0.20 * hypoxia_driver)
+glycolysis = clamp(8 + 28 * threshold_penalty + 0.22 * vulnerability + 0.22 * hypoxia_driver)
+apoptosis = clamp(5 + 18 * threshold_penalty + 0.28 * stress_burden)
 
-# Protective functions depend mainly on resilience and are hurt by stress
-fao = clamp(0.85 * resilience - 0.25 * stress_amplifier)
-angiogenesis = clamp(0.75 * resilience - 0.35 * stress_amplifier)
+# Downstream protective functions
+fao = clamp(92 - 40 * threshold_penalty - 0.28 * stress_burden - 0.10 * vulnerability)
+angiogenesis = clamp(88 - 36 * threshold_penalty - 0.32 * stress_burden - 0.12 * vulnerability)
 
-# Grouped summaries for simpler interpretation
+# Grouped summaries
 oxidative_stress = clamp(ros)
 lipid_stress = clamp(lipid)
 energy_metabolism = clamp((fao + (100 - glycolysis)) / 2)
 vessel_repair = clamp((angiogenesis + (100 - apoptosis)) / 2)
 
-# Overall result uses active stress + preserved function
 stress_load = (oxidative_stress + lipid_stress) / 2
 function_level = (energy_metabolism + vessel_repair) / 2
 
@@ -257,12 +258,12 @@ with st.expander("How this version matches the paper better"):
 This version is designed to reflect the paper's qualitative logic:
 
 - **CES1 loss** increases ROS, lipid stress, apoptosis, and metabolic dysfunction.
-- **BMPR2 and NRF2** support the protective axis rather than acting as equal independent disease drivers.
+- **BMPR2 and NRF2** mainly support the protective CES1 axis.
 - **Epigenetic repression** strongly reduces functional CES1.
-- **Hypoxia** acts as a stress trigger that worsens a fragile system.
-- **Low reserve without hypoxia** is treated as vulnerability, not automatically as full active disease.
+- **Hypoxia** acts as a true amplifier of damage in a fragile system.
+- **CES1 rescue** should visibly improve stress and function outputs.
 
-It is still a **mechanism-inspired conceptual model**, not a fitted experimental model.
+It remains a **mechanism-inspired conceptual model**, not a fitted experimental model.
 """
     )
 
